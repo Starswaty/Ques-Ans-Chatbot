@@ -3,7 +3,11 @@ uvicorn
 jinja2
 python-multipart
 python-dotenv
+requests
 PyMuPDF
 cohere
 scikit-learn
-requests
+python-docx
+openpyxl
+python-pptx
+beautifulsoup4

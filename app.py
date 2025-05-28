@@ -9,6 +9,10 @@ from tempfile import NamedTemporaryFile
 import cohere
 from dotenv import load_dotenv
 from sklearn.metrics.pairwise import cosine_similarity
+from docx import Document
+import openpyxl
+from pptx import Presentation
+from bs4 import BeautifulSoup
 
 load_dotenv()
 app = FastAPI()
@@ -24,23 +28,60 @@ session_store = {}
 
 # ---------- Helper Functions ----------
 
-def download_pdf(url):
+def download_file(url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}  # handle S3 / secured PDFs
+        headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-        with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        ext = os.path.splitext(url)[-1]
+        with NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             tmp.write(response.content)
             return tmp.name
     except Exception as e:
-        raise ValueError(f"Failed to download PDF: {e}")
+        raise ValueError(f"Failed to download file: {e}")
 
-def pdf_to_text(path):
+def extract_text(path):
+    ext = os.path.splitext(path)[-1].lower()
     try:
-        doc = fitz.open(path)
-        return "\n".join(page.get_text() for page in doc)
+        if ext == ".pdf":
+            doc = fitz.open(path)
+            return "\n".join(page.get_text() for page in doc)
+
+        elif ext == ".docx":
+            doc = Document(path)
+            return "\n".join(p.text for p in doc.paragraphs)
+
+        elif ext == ".txt":
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+
+        elif ext in [".xlsx", ".xls"]:
+            wb = openpyxl.load_workbook(path, data_only=True)
+            text = []
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows(values_only=True):
+                    text.append(" ".join(str(cell) for cell in row if cell is not None))
+            return "\n".join(text)
+
+        elif ext == ".pptx":
+            prs = Presentation(path)
+            text_runs = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text_runs.append(shape.text)
+            return "\n".join(text_runs)
+
+        elif ext in [".html", ".htm"]:
+            with open(path, "r", encoding="utf-8") as f:
+                soup = BeautifulSoup(f, "html.parser")
+                return soup.get_text(separator="\n")
+
+        else:
+            raise ValueError(f"Unsupported file format: {ext}")
+
     except Exception as e:
-        raise ValueError(f"Failed to read PDF: {e}")
+        raise ValueError(f"Failed to read {ext} file: {e}")
 
 def chunk_text(text, max_tokens=300):
     words = text.split()
@@ -78,21 +119,22 @@ Answer:"""
 # ---------- API Endpoints ----------
 
 @app.post("/load")
-async def load_pdf(
-    pdf_url: Optional[str] = Form(None),
+async def load_file(
+    file_url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
 ):
     try:
-        if pdf_url:
-            pdf_path = download_pdf(pdf_url)
+        if file_url:
+            file_path = download_file(file_url)
         elif file:
-            with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            ext = os.path.splitext(file.filename)[-1]
+            with NamedTemporaryFile(delete=False, suffix=ext) as tmp:
                 tmp.write(await file.read())
-                pdf_path = tmp.name
+                file_path = tmp.name
         else:
-            return JSONResponse({"error": "Provide either a PDF URL or a file."}, status_code=400)
+            return JSONResponse({"error": "Provide either a file URL or an uploaded file."}, status_code=400)
 
-        text = pdf_to_text(pdf_path)
+        text = extract_text(file_path)
         chunks = chunk_text(text)
         embeddings = embed_chunks(chunks)
 
@@ -102,13 +144,13 @@ async def load_pdf(
             "embeddings": embeddings
         }
 
-        return JSONResponse({"message": "PDF processed successfully.", "session_id": session_id})
+        return JSONResponse({"message": "File processed successfully.", "session_id": session_id})
 
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/chat")
-async def chat_with_pdf(
+async def chat_with_file(
     session_id: str = Form(...),
     question: str = Form(...)
 ):
