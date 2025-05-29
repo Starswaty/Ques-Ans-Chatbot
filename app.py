@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
-from typing import Optional
+from typing import Optional, List
 from uuid import uuid4
 import os
 import fitz  # PyMuPDF
@@ -17,16 +17,15 @@ from bs4 import BeautifulSoup
 load_dotenv()
 app = FastAPI()
 
-# Cohere client setup
+# Cohere setup
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 if not COHERE_API_KEY:
     raise ValueError("Missing COHERE_API_KEY in environment")
 co = cohere.Client(COHERE_API_KEY)
 
-# In-memory session store
 session_store = {}
 
-# ---------- Helper Functions ----------
+# ---------- Helpers ----------
 
 def download_file(url):
     try:
@@ -119,23 +118,40 @@ Answer:"""
 # ---------- API Endpoints ----------
 
 @app.post("/load")
-async def load_file(
-    file_url: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
+async def load_multiple_files(
+    file_urls: Optional[List[str]] = Form(None),
+    files: Optional[List[UploadFile]] = File(None),
 ):
     try:
-        if file_url:
-            file_path = download_file(file_url)
-        elif file:
-            ext = os.path.splitext(file.filename)[-1]
-            with NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                tmp.write(await file.read())
-                file_path = tmp.name
-        else:
-            return JSONResponse({"error": "Provide either a file URL or an uploaded file."}, status_code=400)
+        if not file_urls and not files:
+            return JSONResponse({"error": "Provide at least one file or URL."}, status_code=400)
 
-        text = extract_text(file_path)
-        chunks = chunk_text(text)
+        # Enforce max 8 total files/links
+        total_inputs = (len(file_urls) if file_urls else 0) + (len(files) if files else 0)
+        if total_inputs > 8:
+            return JSONResponse({"error": "You can only upload a maximum of 8 files/URLs."}, status_code=400)
+
+        all_text = []
+
+        # Handle URLs
+        if file_urls:
+            for url in file_urls:
+                downloaded = download_file(url)
+                text = extract_text(downloaded)
+                all_text.append(text)
+
+        # Handle uploaded files
+        if files:
+            for file in files:
+                ext = os.path.splitext(file.filename)[-1]
+                with NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                    tmp.write(await file.read())
+                    file_path = tmp.name
+                text = extract_text(file_path)
+                all_text.append(text)
+
+        combined_text = "\n".join(all_text)
+        chunks = chunk_text(combined_text)
         embeddings = embed_chunks(chunks)
 
         session_id = str(uuid4())
@@ -144,15 +160,15 @@ async def load_file(
             "embeddings": embeddings
         }
 
-        return JSONResponse({"message": "File processed successfully.", "session_id": session_id})
+        return JSONResponse({"message": "All documents processed.", "session_id": session_id})
 
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/chat")
-async def chat_with_file(
+async def chat_with_files(
     session_id: str = Form(...),
-    question: str = Form(...)
+    question: str = Form(...),
 ):
     try:
         session = session_store.get(session_id)
@@ -174,8 +190,7 @@ async def chat_with_file(
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# ---------- Optional: Uvicorn Run ----------
-
+# ---------- Optional: Run ----------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
